@@ -14,10 +14,15 @@ const transport = require("../middlewares/sendMail");
 // SIGNUP
 // ============================================
 exports.signup = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, username } = req.body;
+  console.log(username);
 
   try {
-    const { error, value } = signupSchema.validate({ email, password });
+    const { error, value } = signupSchema.validate({
+      email,
+      password,
+      username,
+    });
 
     if (error) {
       return res.status(401).json({
@@ -42,16 +47,38 @@ exports.signup = async (req, res) => {
     const hashedPassword = await doHash(password, 12);
 
     // Insert new user
-    const result = await pool.query(
-      `INSERT INTO auth_user (email, password) VALUES ($1, $2)`,
-      [email, hashedPassword],
-    );
+    const client = await pool.connect();
 
-    res.status(201).json({
-      success: true,
-      message: "Your account has been created successfully",
-      user: result.rows[0],
-    });
+    try {
+      await client.query("BEGIN");
+      const authResult = await client.query(
+        `INSERT INTO auth_user (email, password) VALUES ($1, $2) RETURNING id`,
+        [email, hashedPassword],
+      );
+
+      const authUserId = authResult.rows[0].id;
+
+      await client.query(
+        "INSERT INTO user_profile (auth_user_id, username) VALUES ($1, $2)",
+        [authUserId, username],
+      );
+
+      await client.query("COMMIT");
+
+      res.status(201).json({
+        success: true,
+        message: "Your account has been created successfully",
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.log(error);
+      return res.status(400).json({
+        success: false,
+        message: "db cancel saving:" + error.message,
+      });
+    } finally {
+      client.release();
+    }
   } catch (error) {
     console.log(error);
     return res.status(500).json({
@@ -79,7 +106,7 @@ exports.signin = async (req, res) => {
 
     // Get user with password (no need for select('+password') because we include it in query)
     const result = await pool.query(
-      "SELECT uuid, email, password_hash, verified FROM user_profile WHERE email = $1",
+      "SELECT user_profile.uuid, user_profile.is_verified, auth_user.password, auth_user.email FROM auth_user JOIN user_profile ON auth_user.id = user_profile.auth_user_id WHERE auth_user.email = $1",
       [email],
     );
 
@@ -92,9 +119,16 @@ exports.signin = async (req, res) => {
       });
     }
 
+    if (!existingUser.is_verified) {
+      return res.status(401).json({
+        success: false,
+        message: "User is not verified!",
+      });
+    }
+
     const isPasswordValid = await doHashValidation(
       password,
-      existingUser.password_hash,
+      existingUser.password,
     );
 
     if (!isPasswordValid) {
@@ -151,7 +185,14 @@ exports.sendVerificationCode = async (req, res) => {
 
   try {
     const result = await pool.query(
-      "SELECT uuid, email, verified FROM user_profile WHERE email = $1",
+      `SELECT
+      auth_user.id,
+      auth_user.email,
+      user_profile.is_verified
+   FROM user_profile
+   JOIN auth_user
+     ON user_profile.auth_user_id = auth_user.id
+   WHERE auth_user.email = $1`,
       [email],
     );
 
@@ -164,7 +205,7 @@ exports.sendVerificationCode = async (req, res) => {
       });
     }
 
-    if (existingUser.verified) {
+    if (existingUser.is_verified) {
       return res.status(402).json({
         success: false,
         message: "You are already verified",
@@ -220,11 +261,11 @@ exports.sendVerificationCode = async (req, res) => {
       );
 
       await pool.query(
-        `UPDATE user_profile 
+        `UPDATE auth_user 
                  SET verification_code = $1, 
-                     verification_code_validation = $2 
-                 WHERE uuid = $3`,
-        [hashedCodeValue, Date.now(), existingUser.uuid],
+                     verification_code_expires_at = $2 
+                 WHERE id = $3`,
+        [hashedCodeValue, new Date(), existingUser.id],
       );
 
       return res.status(200).json({
@@ -265,8 +306,8 @@ exports.verifyVerificationCode = async (req, res) => {
     const codeValue = providedCode.toString();
 
     const result = await pool.query(
-      `SELECT uuid, email, verified, verification_code, verification_code_validation 
-             FROM user_profile 
+      `SELECT id, auth_user.email, user_profile.is_verified, auth_user.verification_code, auth_user.verification_code_expires_at 
+             FROM auth_user JOIN user_profile ON auth_user.id = user_profile.auth_user_id 
              WHERE email = $1`,
       [email],
     );
@@ -282,7 +323,7 @@ exports.verifyVerificationCode = async (req, res) => {
 
     if (
       !existingUser.verification_code ||
-      !existingUser.verification_code_validation
+      !existingUser.verification_code_expires_at
     ) {
       return res.status(400).json({
         success: false,
@@ -320,14 +361,34 @@ exports.verifyVerificationCode = async (req, res) => {
       });
     }
 
-    await pool.query(
-      `UPDATE user_profile 
-             SET verified = true, 
-                 verification_code = NULL, 
-                 verification_code_validation = NULL 
-             WHERE uuid = $1`,
-      [existingUser.uuid],
-    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      await client.query(
+        `
+            UPDATE user_profile SET is_verified = true WHERE auth_user_id = $1
+            `,
+        [existingUser.id],
+      );
+
+      await client.query(
+        `
+            UPDATE auth_user SET verification_code = NULL, verification_code_expires_at = NULL WHERE id = $1`,
+        [existingUser.id],
+      );
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.log(error);
+      return res.status(400).json({
+        success: false,
+        message: "db cancel saving:" + error.message,
+      });
+    } finally {
+      client.release();
+    }
 
     return res.status(200).json({
       success: true,
