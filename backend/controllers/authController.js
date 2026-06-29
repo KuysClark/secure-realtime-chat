@@ -106,7 +106,7 @@ exports.signin = async (req, res) => {
 
     // Get user with password (no need for select('+password') because we include it in query)
     const result = await pool.query(
-      "SELECT user_profile.uuid, user_profile.is_verified, auth_user.password, auth_user.email FROM auth_user JOIN user_profile ON auth_user.id = user_profile.auth_user_id WHERE auth_user.email = $1",
+      "SELECT user_profile.auth_user_id, user_profile.is_verified, auth_user.password, auth_user.email FROM auth_user JOIN user_profile ON auth_user.id = user_profile.auth_user_id WHERE auth_user.email = $1",
       [email],
     );
 
@@ -140,9 +140,9 @@ exports.signin = async (req, res) => {
 
     const token = jwt.sign(
       {
-        userId: existingUser.uuid,
+        userId: existingUser.auth_user_id,
         email: existingUser.email,
-        verified: existingUser.verified,
+        verified: existingUser.is_verified,
       },
       process.env.TOKEN_SECRET,
     );
@@ -431,7 +431,7 @@ exports.changePassword = async (req, res) => {
     }
 
     const result = await pool.query(
-      "SELECT uuid, password_hash FROM user_profile WHERE uuid = $1",
+      "SELECT user_profile.auth_user_id, auth_user.password FROM user_profile JOIN auth_user ON user_profile.auth_user_id = auth_user.id WHERE user_profile.auth_user_id = $1",
       [userId],
     );
 
@@ -446,7 +446,7 @@ exports.changePassword = async (req, res) => {
 
     const isPasswordValid = await doHashValidation(
       oldPassword,
-      existingUser.password_hash,
+      existingUser.password,
     );
 
     if (!isPasswordValid) {
@@ -458,10 +458,10 @@ exports.changePassword = async (req, res) => {
 
     const hashedPassword = await doHash(newPassword, 12);
 
-    await pool.query(
-      "UPDATE user_profile SET password_hash = $1 WHERE uuid = $2",
-      [hashedPassword, userId],
-    );
+    await pool.query("UPDATE auth_user SET password = $1 WHERE id = $2", [
+      hashedPassword,
+      userId,
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -484,7 +484,7 @@ exports.sendForgotPasswordCode = async (req, res) => {
 
   try {
     const result = await pool.query(
-      "SELECT uuid, email FROM user_profile WHERE email = $1",
+      "SELECT id, email FROM auth_user WHERE email = $1",
       [email],
     );
 
@@ -546,11 +546,11 @@ exports.sendForgotPasswordCode = async (req, res) => {
       );
 
       await pool.query(
-        `UPDATE user_profile 
-                 SET forgot_password_code = $1, 
-                     forgot_password_code_validation = $2 
-                 WHERE uuid = $3`,
-        [hashedCodeValue, Date.now(), existingUser.uuid],
+        `UPDATE auth_user 
+                 SET reset_pw_token = $1, 
+                     reset_pw_expires_at = $2 
+                 WHERE id = $3`,
+        [hashedCodeValue, new Date(), existingUser.id],
       );
 
       return res.status(200).json({
@@ -578,6 +578,13 @@ exports.sendForgotPasswordCode = async (req, res) => {
 exports.verifyForgotPasswordCode = async (req, res) => {
   const { email, providedCode, newPassword } = req.body;
 
+  console.log(
+    "Received request to verify forgot password code:",
+    email,
+    providedCode,
+    newPassword,
+  );
+
   try {
     const { error, value } = acceptFPCodeSchema.validate({
       email,
@@ -595,11 +602,12 @@ exports.verifyForgotPasswordCode = async (req, res) => {
     const codeValue = providedCode.toString();
 
     const result = await pool.query(
-      `SELECT uuid, email, forgot_password_code, forgot_password_code_validation 
-             FROM user_profile 
+      `SELECT id, email, reset_pw_token, reset_pw_expires_at 
+             FROM auth_user 
              WHERE email = $1`,
       [email],
     );
+    console.log("Result from DB:", result.rows);
 
     const existingUser = result.rows[0];
 
@@ -610,10 +618,7 @@ exports.verifyForgotPasswordCode = async (req, res) => {
       });
     }
 
-    if (
-      !existingUser.forgot_password_code ||
-      !existingUser.forgot_password_code_validation
-    ) {
+    if (!existingUser.reset_pw_token || !existingUser.reset_pw_expires_at) {
       return res.status(400).json({
         success: false,
         message: "Verification code not found or expired",
@@ -621,7 +626,7 @@ exports.verifyForgotPasswordCode = async (req, res) => {
     }
 
     const currentTime = Date.now();
-    const codeAge = currentTime - existingUser.forgot_password_code_validation;
+    const codeAge = currentTime - existingUser.reset_pw_expires_at;
     const FIVE_MINUTES = 5 * 60 * 1000;
 
     if (codeAge > FIVE_MINUTES) {
@@ -636,7 +641,7 @@ exports.verifyForgotPasswordCode = async (req, res) => {
       process.env.HMAC_VERIFICATION_CODE_SECRET,
     );
 
-    if (hashedCodeValue !== existingUser.forgot_password_code) {
+    if (hashedCodeValue !== existingUser.reset_pw_token) {
       return res.status(400).json({
         success: false,
         message: "Invalid verification code",
@@ -646,13 +651,12 @@ exports.verifyForgotPasswordCode = async (req, res) => {
     const hashedPassword = await doHash(newPassword, 12);
 
     await pool.query(
-      `UPDATE user_profile 
-             SET password_hash = $1, 
-                 verified = true, 
-                 forgot_password_code = NULL, 
-                 forgot_password_code_validation = NULL 
-             WHERE uuid = $2`,
-      [hashedPassword, existingUser.uuid],
+      `UPDATE auth_user 
+             SET password = $1, 
+                 reset_pw_token = NULL, 
+                 reset_pw_expires_at = NULL 
+             WHERE id = $2`,
+      [hashedPassword, existingUser.id],
     );
 
     return res.status(200).json({
