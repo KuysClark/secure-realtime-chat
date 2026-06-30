@@ -28,13 +28,6 @@ const useSignupStore = create((set) => ({
         return;
       }
 
-      // Debug request body
-      console.log("Sending data:", {
-        email,
-        username,
-        password,
-      });
-
       // API Request
       const res = await api.post("/signup", {
         email,
