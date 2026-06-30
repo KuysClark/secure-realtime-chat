@@ -14,8 +14,7 @@ const transport = require("../middlewares/sendMail");
 // SIGNUP
 // ============================================
 exports.signup = async (req, res) => {
-  const { email, password, username } = req.body;
-  console.log(username);
+  const { email, password, confirmPassword, username } = req.body;
 
   try {
     const { error, value } = signupSchema.validate({
@@ -23,6 +22,13 @@ exports.signup = async (req, res) => {
       password,
       username,
     });
+
+    if (password !== confirmPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Passwords do not match",
+      });
+    }
 
     if (error) {
       return res.status(401).json({

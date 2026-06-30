@@ -9,7 +9,12 @@ const app = express();
 
 // --- MIDDLEWARES ---
 app.use(express.json()); // Accept JSON data
-app.use(cors()); // Connect frontend even if different domain
+app.use(
+  cors({
+    origin: "http://localhost:5173", // frontend
+    credentials: true,
+  }),
+); // Connect frontend even if different domain
 app.use(helmet()); // Security headers
 app.use(cookieParser()); // Remember session
 app.use(express.urlencoded({ extended: true })); // Accept HTML form data
